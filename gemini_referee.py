@@ -8,7 +8,7 @@ import os
 # Set this in your system:
 # export GEMINI_API_KEY="your_key_here"
 
-genai.configure(api_key=os.getenv("AIzaSyClOPcQS6-Xsw3l-0FcqIrPjWf6LTjWAM4"))
+genai.configure(api_key=os.getenv("API_KEY"))
 
 
 # -----------------------------
