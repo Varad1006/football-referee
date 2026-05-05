@@ -1,14 +1,7 @@
 """
 tracking.py
 ───────────
-DeepSORT-based player tracker.
-
-Wraps deep_sort_realtime (pip install deep-sort-realtime) and maps
-DeepSORT track IDs back onto Detection objects so every downstream
-module works with stable player IDs.
-
-If deep_sort_realtime is not installed the module falls back to a
-lightweight IoU-based tracker so the pipeline never hard-crashes.
+DeepSORT-based player tracker with Ball Memory (Ghost Tracking).
 """
 
 from __future__ import annotations
@@ -36,12 +29,11 @@ except ImportError:
 # ── Data structures ──────────────────────────────────────────────────────────
 @dataclass
 class TrackedPlayer:
-    """Per-player state maintained across frames."""
     track_id:    int
-    bbox:        np.ndarray          # [x1, y1, x2, y2] latest
+    bbox:        np.ndarray          
     confidence:  float
-    frame_idx:   int                 # last seen frame
-    history:     List[np.ndarray] = field(default_factory=list)   # bbox history
+    frame_idx:   int                 
+    history:     List[np.ndarray] = field(default_factory=list)   
 
     @property
     def cx(self) -> float:
@@ -54,7 +46,6 @@ class TrackedPlayer:
 
 @dataclass
 class TrackingResult:
-    """Tracking output for a single frame."""
     frame_idx:      int
     tracked_players: List[TrackedPlayer] = field(default_factory=list)
     ball_bbox:      Optional[np.ndarray] = None
@@ -68,15 +59,6 @@ class TrackingResult:
 
 # ── DeepSORT wrapper ─────────────────────────────────────────────────────────
 class DeepSORTTracker:
-    """
-    Maintains player identities across frames using DeepSORT.
-
-    Usage
-    -----
-    tracker = DeepSORTTracker()
-    for fd in frame_detections:
-        result = tracker.update(fd)
-    """
 
     def __init__(
         self,
@@ -87,6 +69,11 @@ class DeepSORTTracker:
         self.max_age          = max_age
         self.n_init           = n_init
         self.max_iou_distance = max_iou_distance
+
+        # ── NEW: Ball Memory (Ghost Tracking) ──
+        self._last_ball_bbox = None
+        self._ball_missing_frames = 0
+        self.max_ball_missing_frames = 7  # Hold the ball for ~7 frames if it blurs
 
         if _DEEPSORT_AVAILABLE:
             self._tracker = DeepSort(
@@ -102,21 +89,21 @@ class DeepSORTTracker:
             self._iou_tracker  = _IoUFallbackTracker(max_age=max_age)
             self._use_deepsort = False
 
-    # ── Public API ───────────────────────────────────────────────────────────
     def update(self, fd: FrameDetections, frame: np.ndarray) -> TrackingResult:
-        """
-        Parameters
-        ----------
-        fd    : FrameDetections from detection.py
-        frame : original BGR frame (needed by DeepSORT re-ID embedder)
+        
+        # ── NEW: Ball Memory Logic ──
+        if fd.ball is not None:
+            self._last_ball_bbox = fd.ball.bbox.copy()
+            self._ball_missing_frames = 0
+        else:
+            if self._last_ball_bbox is not None and self._ball_missing_frames < self.max_ball_missing_frames:
+                self._ball_missing_frames += 1
+            else:
+                self._last_ball_bbox = None
 
-        Returns
-        -------
-        TrackingResult with stable track IDs assigned to each player
-        """
         result = TrackingResult(
             frame_idx=fd.frame_idx,
-            ball_bbox=fd.ball.bbox if fd.ball else None,
+            ball_bbox=self._last_ball_bbox, # Inject the ghost ball
         )
 
         if not fd.players:
@@ -130,15 +117,11 @@ class DeepSORTTracker:
         result.tracked_players = tracked
         return result
 
-    # ── DeepSORT path ────────────────────────────────────────────────────────
     def _update_deepsort(
         self,
         fd: FrameDetections,
         frame: np.ndarray,
     ) -> List[TrackedPlayer]:
-        """Convert detections → DeepSORT format → parse output."""
-
-        # DeepSORT expects list of ([left, top, w, h], confidence, class_id)
         raw_detections = []
         for det in fd.players:
             x1, y1, x2, y2 = det.bbox
@@ -152,7 +135,7 @@ class DeepSORTTracker:
             if not track.is_confirmed():
                 continue
             tid  = track.track_id
-            ltrb = track.to_ltrb()                        # [x1, y1, x2, y2]
+            ltrb = track.to_ltrb()                        
             bbox = np.array(ltrb, dtype=np.float32)
             players.append(TrackedPlayer(
                 track_id=tid,
@@ -164,7 +147,9 @@ class DeepSORTTracker:
         return players
 
     def reset(self) -> None:
-        """Reset tracker state between clips."""
+        self._last_ball_bbox = None
+        self._ball_missing_frames = 0
+        
         if self._use_deepsort:
             self._tracker = DeepSort(
                 max_age=self.max_age,
@@ -180,11 +165,6 @@ class DeepSORTTracker:
 
 # ── IoU fallback tracker ─────────────────────────────────────────────────────
 class _IoUFallbackTracker:
-    """
-    Minimal centroid / IoU tracker used when DeepSORT is unavailable.
-    Not production-grade but keeps the pipeline functional.
-    """
-
     def __init__(self, max_age: int = 30, iou_threshold: float = 0.3):
         self.max_age       = max_age
         self.iou_threshold = iou_threshold
@@ -198,10 +178,8 @@ class _IoUFallbackTracker:
             self._age_out()
             return []
 
-        # Build cost matrix (1 - IoU)
         matched, unmatched_dets = self._match(detections)
 
-        # Update matched tracks
         for track_id, det_idx in matched:
             bbox = detections[det_idx]
             tp   = self._tracks[track_id]
@@ -210,7 +188,6 @@ class _IoUFallbackTracker:
             tp.history.append(bbox.copy())
             self._ages[track_id] = 0
 
-        # Create new tracks for unmatched detections
         for det_idx in unmatched_dets:
             tid = self._next_id
             self._next_id += 1
@@ -269,10 +246,7 @@ class _IoUFallbackTracker:
         self._ages.clear()
         self._next_id = 1
 
-
-# ── Utility ───────────────────────────────────────────────────────────────────
 def _iou(b1: np.ndarray, b2: np.ndarray) -> float:
-    """Intersection-over-Union of two [x1,y1,x2,y2] boxes."""
     ix1 = max(b1[0], b2[0])
     iy1 = max(b1[1], b2[1])
     ix2 = min(b1[2], b2[2])

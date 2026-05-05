@@ -15,8 +15,9 @@ import numpy as np
 from tracking import TrackingResult, TrackedPlayer
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-DEFAULT_DISTANCE_THRESHOLD = 120.0   
-DEFAULT_MIN_DURATION_FRAMES = 4      
+# INCREASED to 250px so the interaction "starts" recording before the slide tackle connects
+DEFAULT_DISTANCE_THRESHOLD = 250.0   
+DEFAULT_MIN_DURATION_FRAMES = 2      
 DEFAULT_COOLDOWN_FRAMES = 15         
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -28,7 +29,7 @@ class InteractionEvent:
     end_frame:    int
     peak_frame:   int
     min_distance: float
-    ball_won_cleanly: bool = False  # NEW: Driven by YOLO bounding boxes
+    ball_won_cleanly: bool = False  # Driven by YOLO bounding boxes
 
     @property
     def duration(self) -> int:
@@ -168,7 +169,8 @@ def _canonical_pair(a: int, b: int) -> Tuple[int, int]:
 def _euclidean(pa: TrackedPlayer, pb: TrackedPlayer) -> float:
     return float(np.sqrt((pa.cx - pb.cx) ** 2 + (pa.cy - pb.cy) ** 2))
 
-def _bboxes_intersect(b1: Optional[np.ndarray], b2: Optional[np.ndarray], margin: float = 40.0) -> bool:
+# INCREASED MARGIN to 100.0 to account for massive slide tackle extensions
+def _bboxes_intersect(b1: Optional[np.ndarray], b2: Optional[np.ndarray], margin: float = 100.0) -> bool:
     """Returns True if two bounding boxes overlap, factoring in a reach margin."""
     if b1 is None or b2 is None:
         return False

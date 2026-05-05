@@ -68,7 +68,7 @@ MIN_DURATION_FRAMES = 2     # frames (was 4)
 CLIP_LENGTH = 16            # frames (was 8)
 
 
-# ── Result ─────────────────────────────────────────────────────────────────────
+#  Result 
 @dataclass
 class PipelineResult:
     aggregation:     AggregationResult
@@ -79,9 +79,10 @@ class PipelineResult:
     warning:         Optional[str]                        = None
     frames_decoded:  int                                  = 0
     frames_yolo:     int                                  = 0
+    tracking_history: Dict[int, List[TrackedPlayer]]      = field(default_factory=dict)
 
 
-# ── Pipeline ───────────────────────────────────────────────────────────────────
+# ── Pipeline
 class RefereePipeline:
 
     @classmethod
@@ -145,8 +146,8 @@ class RefereePipeline:
         self.yolo_interval      = yolo_interval
         self.ring_buffer_frames = ring_buffer_frames
 
-    # ── Main entry point ──────────────────────────────────────────────────────
-    def analyse(self, video_path: str, auto_cleanup: bool = True) -> PipelineResult:
+    #  Main entry point 
+    def analyse(self, video_path: str, auto_cleanup: bool = False) -> PipelineResult:
         t0 = time.perf_counter()
 
         self.tracker.reset()
@@ -166,6 +167,8 @@ class RefereePipeline:
 
         ring_buffer:    Dict[int, np.ndarray] = {}
         ring_keys:      Deque[int]            = deque()
+
+        track_history:  Dict[int, List[TrackedPlayer]] = {}
 
         frames_decoded   = 0
         frames_processed = 0
@@ -192,6 +195,8 @@ class RefereePipeline:
                 _last_fd.frame_idx = frame_idx
 
             tr = self.tracker.update(_last_fd, frame)
+
+            track_history[frame_idx] = tr.tracked_players
 
             # Buffer ALL frames with ≥1 player (was ≥2) — we may miss lone
             # player frames just before a tackle starts
@@ -221,7 +226,7 @@ class RefereePipeline:
         if auto_cleanup:
             _safe_delete(video_path)
 
-        # ── Build clip ────────────────────────────────────────────────────────
+        # Build clip 
         pipeline_mode = "full"
         warning       = None
         best_event    = None
@@ -261,12 +266,12 @@ class RefereePipeline:
 
         print(f"[Pipeline] Clip ready: {len(clip)} frames")
 
-        # ── Ensemble inference ─────────────────────────────────────────────────
+        # Ensemble inference
         clip_pred  = self.classifier.predict(clip)
         top_frames = self.classifier.top_k_frames(clip, clip_pred, k=3)
         top_for_agg = [(fi, sc) for fi, sc, _ in top_frames]
 
-        # ── Aggregation ────────────────────────────────────────────────────────
+        # Aggregation 
         aggregation = self.aggregator.aggregate(clip_pred, best_event, top_for_agg)
 
         elapsed = time.perf_counter() - t0
@@ -286,6 +291,7 @@ class RefereePipeline:
             warning=warning,
             frames_decoded=frames_decoded,
             frames_yolo=frames_yolo,
+            tracking_history=track_history,
         )
 
 
